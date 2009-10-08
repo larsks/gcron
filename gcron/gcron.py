@@ -6,11 +6,14 @@ import urllib
 import re
 import datetime
 import logging
+import ConfigParser
+import optparse
+import time
 
 import icalendar
-import dateutil.rrule as rrule
-import dateutil.parser as parser
 import pytz
+
+import rrule
 
 re_named_period = re.compile('(\d*)(\w+)')
 
@@ -32,88 +35,72 @@ fieldmap = {
         'UNTIL':    ('until',       lambda x: tz.fromutc(x).replace(tzinfo=None)),
         }
 
-cal = icalendar.Calendar.from_string(open('calendar.ical').read())
-now = datetime.datetime.today()
-
-def mkrrule(r, **kwargs):
-    ruledict = {}
-
-    for k,v in kwargs.items():
-        if k is not None:
-            ruledict[k] = v
-
-    for k,v in r.items():
-        if k in fieldmap:
-            if fieldmap[k][1] is None:
-                continue
-            else:
-                ruledict[fieldmap[k][0]] = fieldmap[k][1](v[0])
-        else:
-            ruledict[k.lower()] = str(v[0])
-
-    print 'ruledict:', ruledict
-
-    return rrule.rrule(**ruledict)
-
-
 class Gcron (object):
-    def __init__ (self, url=None, interval=1800):
-        self.url = url
-        self.interval = interval
+    def __init__ (self, cfg):
+        self.url = cfg.get('gcron', 'url')
+        self.interval = cfg.get('gcron', 'interval')
         self.log = logging.getLogger('gcron')
 
     def run(self):
         while True:
             loop_start = time.time()
 
-            urlfd = urllib.openurl(self.url)
-            cal = icalendar.Calendar.from_string(urlfd.read())
-        
-            self.parse(cal)
+            self.load()
+            self.parse()
+            print self.data
 
-            time.sleep(self.interval - (time.time() - loop_start))
+            time.sleep(float(self.interval) - (time.time() - loop_start))
 
-    def parse(self, cal):
-        cald = {}
-        for component in cal.walk():
+    def load(self):
+        urlfd = urllib.urlopen(self.url)
+        text = []
+        for line in urlfd:
+            if line.startswith('CREATED'):
+                continue
+            else:
+                text.append(line.strip())
+
+        self.ical = icalendar.Calendar.from_string('\n'.join(text))
+
+    def parse(self):
+        self.data = {
+                'events': [],
+                'tz': pytz.utc,
+                }
+        for component in self.ical.walk():
             if component.name == 'VTIMEZONE' and 'TZID' in component:
-                cald{'tz'} = pytz.timezone(component['TZID'])
+                self.data['tz'] = pytz.timezone(component['TZID'])
             elif component.name == 'VEVENT':
                 if component.get('DESCRIPTION', '').startswith('#!'):
-                    print 'Found an executable item.'
-                    print '  Description:', component['SUMMARY']
-                    print '  UID:', component['UID']
-                    t_start = component['DTSTART'].dt
-
-                    if not t_start.tzinfo:
-                        t_start = tz.localize(component['DTSTART'].dt)
-
-                    t_start = t_start.astimezone(tz)
-
-                    print '  Starts:', t_start
+                    event = { 'description': component['SUMMARY'],
+                            'uid': component['UID'],
+                            'script': component['DESCRIPTION'],
+                            }
+                    dtstart = component['DTSTART'].dt
+                    if not dtstart.tzinfo:
+                        dtstart = self.data['tz'].localize(component['DTSTART'].dt)
+                    event['dtstart'] = dtstart.astimezone(self.data['tz'])
 
                     if 'RRULE' in component:
                         rep = component['RRULE']
-                        print rep
-                        print 'Repeats %s.' % rep['FREQ'][0]
+                        event['rrule'] = rrule.mkrrule(rep, dtstart=dtstart.replace(tzinfo=None))
 
-                        rule = mkrrule(rep, dtstart=t_start.replace(tzinfo=None))
-                        t_run = rule.after(datetime.datetime.now())
-                    else:
-                        t_run = t_start
-
-                    print 'next executes:', t_run
-                    print
+                    self.data['events'].append(event)
 
 def parse_args():
     p = optparse.OptionParser()
-    p.add_option('-f', '--feed-url')
+    p.add_option('-f', '--config-file', default='gcron.ini')
     p.add_option('-i', '--interval')
     return p.parse_args()
 
 def run():
     opts, args = parse_args()
-    g = Gcron(url=opts.feed_url, interval=opts.interval)
-    g.run()
+    cfg = ConfigParser.ConfigParser()
+    cfg.readfp(open(opts.config_file))
 
+    if opts.interval:
+        cfg.set('gcron', 'interval', opts.interval)
+
+    g = Gcron(cfg)
+    g.run()
 
