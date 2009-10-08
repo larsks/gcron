@@ -3,43 +3,24 @@
 import os
 import sys
 import urllib
-import re
 import datetime
 import logging
 import ConfigParser
 import optparse
 import time
+import pprint
 
 import icalendar
 import pytz
 
 import rrule
 
-re_named_period = re.compile('(\d*)(\w+)')
-
-def parse_named_period (wd):
-    mo = re_named_period.match(wd)
-    c = getattr(rrule, mo.group(2))
-
-    if mo.group(1):
-        return c(int(mo.group(1)))
-    else:
-        return c
-
-fieldmap = {
-        'FREQ':     ('freq',        lambda(x): getattr(rrule, x)),
-        'BYDAY':    ('byweekday',   parse_named_period),
-        'BYMONTH':  ('bymonth',     int),
-        'WKST':     ('wkst',        lambda(x): getattr(rrule, x)),
-        'INTERVAL': ('interval',    int),
-        'UNTIL':    ('until',       lambda x: tz.fromutc(x).replace(tzinfo=None)),
-        }
-
 class Gcron (object):
     def __init__ (self, cfg):
         self.url = cfg.get('gcron', 'url')
         self.interval = cfg.get('gcron', 'interval')
         self.log = logging.getLogger('gcron')
+        self.delta = datetime.timedelta(seconds=int(cfg.get('gcron', 'delta')))
 
     def run(self):
         while True:
@@ -47,7 +28,9 @@ class Gcron (object):
 
             self.load()
             self.parse()
-            print self.data
+            pprint.pprint( self.events)
+
+            self.execute()
 
             time.sleep(float(self.interval) - (time.time() - loop_start))
 
@@ -63,13 +46,10 @@ class Gcron (object):
         self.ical = icalendar.Calendar.from_string('\n'.join(text))
 
     def parse(self):
-        self.data = {
-                'events': [],
-                'tz': pytz.utc,
-                }
+        self.events = []
         for component in self.ical.walk():
             if component.name == 'VTIMEZONE' and 'TZID' in component:
-                self.data['tz'] = pytz.timezone(component['TZID'])
+                self.tz = pytz.timezone(component['TZID'])
             elif component.name == 'VEVENT':
                 if component.get('DESCRIPTION', '').startswith('#!'):
                     event = { 'description': component['SUMMARY'],
@@ -78,19 +58,45 @@ class Gcron (object):
                             }
                     dtstart = component['DTSTART'].dt
                     if not dtstart.tzinfo:
-                        dtstart = self.data['tz'].localize(component['DTSTART'].dt)
-                    event['dtstart'] = dtstart.astimezone(self.data['tz'])
+                        dtstart = self.tz.localize(component['DTSTART'].dt)
+                    event['dtstart'] = dtstart.astimezone(self.tz)
 
                     if 'RRULE' in component:
                         rep = component['RRULE']
                         event['rrule'] = rrule.mkrrule(rep, dtstart=dtstart.replace(tzinfo=None))
 
-                    self.data['events'].append(event)
+                    self.events.append(event)
+
+    def execute(self):
+        now = datetime.datetime.today()
+
+        for event in self.events:
+            if 'rrule' in event:
+                next = event['rrule'].after(now, True)
+            else:
+                next = event['dtstart']
+
+            try:
+                delta = next - now
+            except TypeError:
+                delta = next - self.tz.localize(now)
+
+            print 'Event %s next due at %s.' % (event['uid'], next)
+            print 'Event Delta:',  delta
+            print 'Max delta:', self.delta
+
+            if delta <= self.delta:
+                print 'Execute now!'
+                print event['script']
+                print
+
+            print
 
 def parse_args():
     p = optparse.OptionParser()
     p.add_option('-f', '--config-file', default='gcron.ini')
     p.add_option('-i', '--interval')
+    p.add_option('-d', '--delta')
     return p.parse_args()
 
 def run():
@@ -100,6 +106,9 @@ def run():
 
     if opts.interval:
         cfg.set('gcron', 'interval', opts.interval)
+
+    if opts.delta:
+        cfg.set('gcron', 'delta', opts.delta)
 
     g = Gcron(cfg)
     g.run()
