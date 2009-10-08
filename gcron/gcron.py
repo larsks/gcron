@@ -5,15 +5,12 @@ import sys
 import urllib
 import re
 import datetime
+import logging
 
 import icalendar
 import dateutil.rrule as rrule
 import dateutil.parser as parser
 import pytz
-
-re_time = re.compile('''(?P<year>\d\d\d\d)(?P<month>\d\d)(?P<day>\d\d)
-    T(?P<hour>\d\d)(?P<minute>\d\d)(?P<second>\d\d)(?P<tz>.*)''',
-    re.VERBOSE)
 
 re_named_period = re.compile('(\d*)(\w+)')
 
@@ -57,36 +54,66 @@ def mkrrule(r, **kwargs):
     print 'ruledict:', ruledict
 
     return rrule.rrule(**ruledict)
-for component in cal.walk():
-    if component.name == 'VTIMEZONE':
-        print 'SETTING TIMEZONE'
-        tzid = component['TZID']
-        tz = pytz.timezone(tzid)
-        print
-    elif component.name == 'VEVENT':
-        if component.get('DESCRIPTION', '').startswith('#!'):
-            print 'Found an executable item.'
-            print '  Description:', component['SUMMARY']
-            print '  UID:', component['UID']
-            t_start = component['DTSTART'].dt
 
-            if not t_start.tzinfo:
-                t_start = tz.localize(component['DTSTART'].dt)
 
-            t_start = t_start.astimezone(tz)
+class Gcron (object):
+    def __init__ (self, url=None, interval=1800):
+        self.url = url
+        self.interval = interval
+        self.log = logging.getLogger('gcron')
 
-            print '  Starts:', t_start
+    def run(self):
+        while True:
+            loop_start = time.time()
 
-            if 'RRULE' in component:
-                rep = component['RRULE']
-                print rep
-                print 'Repeats %s.' % rep['FREQ'][0]
+            urlfd = urllib.openurl(self.url)
+            cal = icalendar.Calendar.from_string(urlfd.read())
+        
+            self.parse(cal)
 
-                rule = mkrrule(rep, dtstart=t_start.replace(tzinfo=None))
-                t_run = rule.after(datetime.datetime.now())
-            else:
-                t_run = t_start
+            time.sleep(self.interval - (time.time() - loop_start))
 
-            print 'next executes:', t_run
-            print
+    def parse(self, cal):
+        cald = {}
+        for component in cal.walk():
+            if component.name == 'VTIMEZONE' and 'TZID' in component:
+                cald{'tz'} = pytz.timezone(component['TZID'])
+            elif component.name == 'VEVENT':
+                if component.get('DESCRIPTION', '').startswith('#!'):
+                    print 'Found an executable item.'
+                    print '  Description:', component['SUMMARY']
+                    print '  UID:', component['UID']
+                    t_start = component['DTSTART'].dt
+
+                    if not t_start.tzinfo:
+                        t_start = tz.localize(component['DTSTART'].dt)
+
+                    t_start = t_start.astimezone(tz)
+
+                    print '  Starts:', t_start
+
+                    if 'RRULE' in component:
+                        rep = component['RRULE']
+                        print rep
+                        print 'Repeats %s.' % rep['FREQ'][0]
+
+                        rule = mkrrule(rep, dtstart=t_start.replace(tzinfo=None))
+                        t_run = rule.after(datetime.datetime.now())
+                    else:
+                        t_run = t_start
+
+                    print 'next executes:', t_run
+                    print
+
+def parse_args():
+    p = optparse.OptionParser()
+    p.add_option('-f', '--feed-url')
+    p.add_option('-i', '--interval')
+    return p.parse_args()
+
+def run():
+    opts, args = parse_args()
+    g = Gcron(url=opts.feed_url, interval=opts.interval)
+    g.run()
+
 
