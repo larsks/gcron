@@ -18,6 +18,9 @@ def parse_named_period (wd):
     else:
         return c
 
+# XXX: This is broken!  xform function for UNTIL references unbound
+# variable tz.  This used to be global, but now it is only defined 
+# in the context of a Gcron() object.  What to do?
 fieldmap = {
         'FREQ':     { 'xform': get_rrule_constant },
         'BYDAY':    { 'name': 'byweekday',
