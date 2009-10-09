@@ -17,6 +17,11 @@ import pytz
 import rrule
 import script
 
+config_defaults = {
+        'interval': 1800,
+        'delta':    10,
+        }
+
 class Gcron (object):
     def __init__ (self, cfg):
         self.url = cfg.get('gcron', 'url')
