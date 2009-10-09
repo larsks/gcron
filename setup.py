@@ -6,5 +6,5 @@ setup(name='netreg',
         author='Lars Kellogg-Stedman',
         author_email='lars@oddbit.com',
         packages=['gcron'],
-        install_requires=['python-dateutil', 'pytz'],
+        install_requires=['vobject', 'python-dateutil', 'pytz'],
         )

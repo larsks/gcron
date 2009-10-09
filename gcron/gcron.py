@@ -9,88 +9,83 @@ import ConfigParser
 import optparse
 import time
 import pprint
+import cStringIO as StringIO
 
-import icalendar
+import vobject
 import pytz
 
 import rrule
+import script
 
 class Gcron (object):
     def __init__ (self, cfg):
         self.url = cfg.get('gcron', 'url')
         self.interval = cfg.get('gcron', 'interval')
         self.log = logging.getLogger('gcron')
+        self.log.addHandler(logging.StreamHandler())
+        self.log.setLevel(logging.INFO)
         self.delta = datetime.timedelta(seconds=int(cfg.get('gcron', 'delta')))
 
     def run(self):
+        self.log.info('Starting up.')
         while True:
             loop_start = time.time()
 
             self.load()
             self.parse()
-            pprint.pprint( self.events)
-
             self.execute()
 
             time.sleep(float(self.interval) - (time.time() - loop_start))
 
     def load(self):
+        textfd = StringIO.StringIO()
+        self.log.info('Loading calendar from %s.' % self.url)
         urlfd = urllib.urlopen(self.url)
-        text = []
         for line in urlfd:
-            if line.startswith('CREATED'):
-                continue
-            else:
-                text.append(line.strip())
+            if not line.startswith('CREATED'):
+                textfd.write(line)
+        textfd.seek(0)
 
-        self.ical = icalendar.Calendar.from_string('\n'.join(text))
+        self.log.info('Parsing calendar.')
+        self.ical = vobject.readOne(textfd)
 
     def parse(self):
         self.events = []
-        for component in self.ical.walk():
-            if component.name == 'VTIMEZONE' and 'TZID' in component:
-                self.tz = pytz.timezone(component['TZID'])
+        self.log.info('Processing calendar components.')
+        for component in self.ical.getChildren():
+            if component.name == 'VTIMEZONE':
+                self.tz = component.tzinfo
             elif component.name == 'VEVENT':
-                if component.get('DESCRIPTION', '').startswith('#!'):
-                    event = { 'description': component['SUMMARY'],
-                            'uid': component['UID'],
-                            'script': component['DESCRIPTION'],
-                            }
-                    dtstart = component['DTSTART'].dt
-                    if not dtstart.tzinfo:
-                        dtstart = self.tz.localize(component['DTSTART'].dt)
-                    event['dtstart'] = dtstart.astimezone(self.tz)
+                event = {
+                        'description': component.summary.value,
+                        'uid': component.uid.value,
+                        'script': component.description.value,
+                        'dtstart': component.dtstart.value,
+                        'rruleset': component.getrruleset(),
+                        }
+                self.log.info('Added event "%(description)s" (uid %(uid)s).' % event)
 
-                    if 'RRULE' in component:
-                        rep = component['RRULE']
-                        event['rrule'] = rrule.mkrrule(rep, dtstart=dtstart.replace(tzinfo=None))
-
-                    self.events.append(event)
+                self.events.append(event)
 
     def execute(self):
-        now = datetime.datetime.today()
+        now = datetime.datetime.now(pytz.utc)
 
         for event in self.events:
-            if 'rrule' in event:
-                next = event['rrule'].after(now, True)
+            print event
+            print 'now:', now
+            print 'start:', event['dtstart']
+            if now > event['dtstart']:
+                self.log.info('Skipping event %(uid)s: in the past.' % event)
+                continue
+
+            if event['rruleset']:
+                next = event['rruleset'].after(now)
             else:
                 next = event['dtstart']
 
-            try:
-                delta = next - now
-            except TypeError:
-                delta = next - self.tz.localize(now)
-
-            print 'Event %s next due at %s.' % (event['uid'], next)
-            print 'Event Delta:',  delta
-            print 'Max delta:', self.delta
-
+            delta = next - now
             if delta <= self.delta:
                 print 'Execute now!'
-                print event['script']
-                print
-
-            print
 
 def parse_args():
     p = optparse.OptionParser()
