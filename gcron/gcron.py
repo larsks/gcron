@@ -18,31 +18,45 @@ import rrule
 import script
 
 config_defaults = {
-        'interval': 1800,
-        'delta':    10,
+        'run-interval'      : '1800',
+        'refresh-interval'  : '10800',
+        'debug'             : '0',
         }
 
 class Gcron (object):
     def __init__ (self, cfg):
         self.url = cfg.get('gcron', 'url')
-        self.interval = cfg.get('gcron', 'interval')
+        self.refresh_interval = int(cfg.get('gcron', 'refresh-interval'))
+        self.run_interval = int(cfg.get('gcron', 'run-interval'))
+        self.last_refresh = 0
+        self.events = {}
+
         self.log = logging.getLogger('gcron')
         self.log.addHandler(logging.StreamHandler())
-        self.log.setLevel(logging.INFO)
-        self.delta = datetime.timedelta(seconds=int(cfg.get('gcron', 'delta')))
+
+        if int(cfg.get('gcron', 'debug')):
+            self.log.setLevel(logging.DEBUG)
+        else:
+            self.log.setLevel(logging.INFO)
 
     def run(self):
         self.log.info('Starting up.')
         while True:
             loop_start = time.time()
 
-            self.load()
-            self.parse()
+            if (loop_start - self.last_refresh) > self.refresh_interval:
+                self.log.info('Refresh.')
+                self.load()
+                self.parse()
+                self.last_refresh = loop_start
+
             self.execute()
 
-            time.sleep(float(self.interval) - (time.time() - loop_start))
+            time.sleep(float(self.run_interval) - (time.time() - loop_start))
 
     def load(self):
+        self.tz = pytz.utc
+
         textfd = StringIO.StringIO()
         self.log.info('Loading calendar from %s.' % self.url)
         urlfd = urllib.urlopen(self.url)
@@ -55,7 +69,6 @@ class Gcron (object):
         self.ical = vobject.readOne(textfd)
 
     def parse(self):
-        self.events = []
         self.log.info('Processing calendar components.')
         for component in self.ical.getChildren():
             if component.name == 'VTIMEZONE':
@@ -68,19 +81,21 @@ class Gcron (object):
                         'dtstart': component.dtstart.value,
                         'rruleset': component.getrruleset(),
                         }
-                self.log.info('Added event "%(description)s" (uid %(uid)s).' % event)
 
-                self.events.append(event)
+                self.events[event['uid']] = event
+
+                self.log.debug('Added event "%(description)s" (uid %(uid)s).' % event)
+        self.log.info('Found %d events.' % len(self.events))
 
     def execute(self):
-        now = datetime.datetime.now(pytz.utc)
+        now = datetime.datetime.now(pytz.utc).replace(second=0,
+                microsecond=0)
+        self.log.debug('Now: %s' % now)
 
-        for event in self.events:
-            print event
-            print 'now:', now
-            print 'start:', event['dtstart']
+        for event in self.events.values():
             if now > event['dtstart']:
-                self.log.info('Skipping event %(uid)s: in the past.' % event)
+                self.log.debug('Removing event %(uid)s: in the past.' % event)
+                del self.events[event['uid']]
                 continue
 
             if event['rruleset']:
@@ -88,27 +103,38 @@ class Gcron (object):
             else:
                 next = event['dtstart']
 
-            delta = next - now
-            if delta <= self.delta:
-                print 'Execute now!'
+            if next == now:
+                self.log.info('Execute %(description)s.' % event)
+                s = script.Script(text=event['script'])
+                res = s.run()
+                self.log.info('%s return code: %d' % (event['description'],
+                    res))
+            else:
+                delta = next - now
+                self.log.debug('Event %s next executes: %s (delta: %s)' \
+                        % (event['description'], next, delta))
+
 
 def parse_args():
     p = optparse.OptionParser()
     p.add_option('-f', '--config-file', default='gcron.ini')
-    p.add_option('-i', '--interval')
-    p.add_option('-d', '--delta')
+    p.add_option('--debug', action='store_true')
+    p.add_option('-o', '--option', action='append', default=[])
     return p.parse_args()
 
 def run():
     opts, args = parse_args()
-    cfg = ConfigParser.ConfigParser()
+    cfg = ConfigParser.ConfigParser(defaults=config_defaults)
     cfg.readfp(open(opts.config_file))
 
-    if opts.interval:
-        cfg.set('gcron', 'interval', opts.interval)
+    for cfgopt in opts.option:
+        optname, optval = cfgopt.split('=')
+        cfg.set('gcron', optname, optval)
 
-    if opts.delta:
-        cfg.set('gcron', 'delta', opts.delta)
+    if opts.debug:
+        cfg.set('gcron', 'debug', '1')
+        print ', '.join(['%s=%s' % (x,y) for (x,y) in
+            [(x, cfg.get('gcron', x)) for x in cfg.options('gcron')]])
 
     g = Gcron(cfg)
     g.run()
