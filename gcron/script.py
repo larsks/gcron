@@ -14,5 +14,5 @@ class Script (object):
         os.chmod(self.fd.name, 0755)
 
     def run(self):
-        subprocess.call(['/bin/sh', self.fd.name])
+        return subprocess.call(['/bin/sh', self.fd.name])
 
